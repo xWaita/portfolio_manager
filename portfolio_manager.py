@@ -31,7 +31,7 @@ class PortfolioManager:
         self.OUTPUT_PATH.mkdir(exist_ok=True)
 
 
-    def get_client_risk(self, group: int):
+    def get_client_risk(self, group: int) -> str:
         if group >= 1 and group <= 3:
             return 'Risk Averse'
         elif group >= 4 and group <= 7:
@@ -40,7 +40,7 @@ class PortfolioManager:
             return 'Risk Seeker'
         
 
-    def get_client_age(self, group: int):
+    def get_client_age(self, group: int) -> str:
         if group == 1:
             return '18-24'
         elif group == 2:
@@ -139,16 +139,18 @@ class PortfolioManager:
 
         client_return = self.portfolio_return(weights, self.data['returns'])
         client_stdev = self.portfolio_stdev(weights, self.data['returns'])
+        client_sharpe = self.portfolio_sharpe(weights, self.data['returns'], with_risk_free_asset=False)
         print('Current return:', str(round(100*client_return, 3))+'%')
         print('Current volatility:', round(client_stdev, 3))
+        print('Current Sharpe:', round(client_sharpe, 4), '(no risk-free asset)')
 
 
     # test normality of feature
-    def is_normal(self, feature: str, output_graphs: bool = True):
+    def is_normal(self, feature: str, output_graphs: bool = True) -> bool:
         print('Testing Normality of', feature)
 
         # graphical inspection using density plot
-        self.data[feature].plot.kde(subplots=True, figsize = [10, 15])
+        self.data[feature].plot.kde(subplots=True, figsize = [10, 20])
         plt.savefig(self.OUTPUT_PATH / Path(feature+'_distribution.png'))
         plt.close()
 
@@ -215,18 +217,21 @@ class PortfolioManager:
         optimal_weights_volatility = portfolio_alloc_stdev['x']
         optimal_return_volatility = self.portfolio_return(optimal_weights_volatility, returns)
         optimal_stdev_volatility = self.portfolio_stdev(optimal_weights_volatility, returns)
+        optimal_sharpe_volatility = \
+            self.portfolio_sharpe(optimal_weights_volatility, returns, with_risk_free_asset=False)
 
-        print('Portfolio Allocation (Minimising Volatility):')
+        print('Portfolio Allocation - Minimising Volatility:')
         for idx, weight in enumerate(optimal_weights_volatility):
             print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
         print('Estimated Return:', str(round(100*optimal_return_volatility, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_volatility, 3))
+        print('Sharpe Ratio:', round(optimal_sharpe_volatility, 4), '(no risk-free asset)')
         print('-'*20)
 
-        # portfolio allocation when maximising sharpe ratio
+        # portfolio allocation when maximising sharpe ratio (no risk-free asset)
         portfolio_alloc_sharpe = sco.minimize(
-            fun = lambda weights: -self.portfolio_sharpe(weights, returns),
+            fun = lambda weights: -self.portfolio_sharpe(weights, returns, with_risk_free_asset=False),
             x0 = [1/n_assets for _ in range(n_assets)], 
             method = 'SLSQP',
             bounds = [(0, 1) for _ in range(n_assets)], 
@@ -236,13 +241,16 @@ class PortfolioManager:
         optimal_weights_sharpe = portfolio_alloc_sharpe['x']
         optimal_return_sharpe = self.portfolio_return(optimal_weights_sharpe, returns)
         optimal_stdev_sharpe = self.portfolio_stdev(optimal_weights_sharpe, returns)
+        optimal_sharpe_sharpe = \
+            self.portfolio_sharpe(optimal_weights_sharpe, returns, with_risk_free_asset=False)
 
-        print('Portfolio Allocation (Maximising Sharpe):')
+        print('Portfolio Allocation - Maximising Sharpe (no risk-free asset):')
         for idx, weight in enumerate(optimal_weights_sharpe):
             print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
         print('Estimated Return:', str(round(100*optimal_return_sharpe, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_sharpe, 3))
+        print('Sharpe Ratio:', round(optimal_sharpe_sharpe, 4), '(no risk-free asset)')
         print('-'*20)
 
         # find efficient frontier for returns in range [0.001, 0.14]
@@ -270,9 +278,10 @@ class PortfolioManager:
 
         # return and volatility when efficient frontier is tangent to risk-free line
         optimal_stdev_tangent = sco.fsolve(
+            # difference between slope formed by points [(stdev, return), (0, risk_free_rate)]
+            # and slope of the tangent at point stdev
             func = lambda stdev: abs(
-                (sci.splev(stdev, spline) - self.risk_free_rate) / stdev - 
-                sci.splev(stdev, spline, der=1)
+                (sci.splev(stdev, spline) - self.risk_free_rate) / stdev - sci.splev(stdev, spline, der=1)
             ), 
             x0 = 1
         )
@@ -292,19 +301,21 @@ class PortfolioManager:
         )
         assert portfolio_alloc_tangent['success'], portfolio_alloc_tangent['message']
         optimal_weights_tangent = portfolio_alloc_tangent['x']
+        optimal_sharpe_tangent = \
+            self.portfolio_sharpe(optimal_weights_tangent, returns)
         
-        print('Portfolio Allocation (Efficient Frontier with tangent to risk-free line):')
+        print('Portfolio Allocation - Optimising Tangent to risk-free asset:')
         for idx, weight in enumerate(optimal_weights_tangent):
             print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
         print('Estimated Return:', str(round(100*float(optimal_return_tangent), 3))+'%')
         print('Estimated Volatility:', round(float(optimal_stdev_tangent), 3))
+        print('Sharpe Ratio:', round(optimal_sharpe_tangent, 4), '(with risk-free asset)')
 
         '''
         Calculate client portfolio statistics
         '''
 
-        client_id = self.client_id
         client_weights = self.client_data.iloc[2:]
         client_return = self.portfolio_return(client_weights, returns)
         client_stdev = self.portfolio_stdev(client_weights, returns)
@@ -341,7 +352,7 @@ class PortfolioManager:
             optimal_return_sharpe*100,
             'm*',
             markersize = 15.0, 
-            label = 'Highest Sharpe Ratio'
+            label = 'Highest Sharpe Ratio (no risk-free asset)'
         )
         # plot optimal tangent portfolio (with risk-free asset)
         plt.plot(
@@ -370,22 +381,25 @@ class PortfolioManager:
         plt.close()
 
 
-    def portfolio_return(self, weights, returns):
+    def portfolio_return(self, weights, returns) -> float:
         try:
             return np.sum(returns.mean() * weights)
         except ValueError:
             raise ValueError('Number of weights and assets must match')
     
 
-    def portfolio_stdev(self, weights, returns):
+    def portfolio_stdev(self, weights, returns) -> float:
         try:
             return np.sqrt(np.dot(weights.T, np.dot(returns.cov(), weights)))
         except ValueError:
             raise ValueError('Number of weights and assets must match')
 
 
-    def portfolio_sharpe(self, weights, returns):
+    def portfolio_sharpe(self, weights, returns, with_risk_free_asset: bool = True) -> float:
         try:
-            return self.portfolio_return(weights, returns) / self.portfolio_stdev(weights, returns)
+            if with_risk_free_asset:
+                return (self.portfolio_return(weights, returns) - self.risk_free_rate) / self.portfolio_stdev(weights, returns)
+            else:
+                return self.portfolio_return(weights, returns) / self.portfolio_stdev(weights, returns)
         except ValueError:
             raise ValueError('Number of weights and assets must match')
