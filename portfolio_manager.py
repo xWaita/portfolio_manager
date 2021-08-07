@@ -1,14 +1,14 @@
 import sys
 from pathlib import Path
 import pandas as pd
-from pandas.core.frame import DataFrame
+from pandas.core.frame import DataFrame, Series
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as scs
 import scipy.optimize as sco
 import scipy.interpolate as sci
 import math
-np.random.seed(420)
+np.random.seed(420420)
 
 
 class PortfolioManager:
@@ -23,11 +23,7 @@ class PortfolioManager:
 
     def __init__(self):
         self.data = {}
-        self.asset_list = None
-        self.all_clients = None
-        self.client_id = None
-        self.client_data = None
-        self.selected_features = []
+        self.client_data = DataFrame()
         self.OUTPUT_PATH.mkdir(exist_ok=True)
 
 
@@ -59,45 +55,43 @@ class PortfolioManager:
 
         if self.data:
             self.data.clear()
-        if self.asset_list:
-            self.asset_list = None
-        if self.all_clients:
-            self.all_clients = None
+        if not self.client_data.empty:
+            self.client_data = DataFrame()
 
         # extract list of assets
-        self.asset_list = \
+        asset_list = \
             pd.read_excel(self.ASSET_DATA_FILE_PATH, 'Bloomberg raw', header=None).iloc[0, :].dropna()
-        self.asset_list = self.asset_list[self.asset_list != 'AS51 Index']
-        self.asset_list.index = [n for n in range(self.asset_list.shape[0])]
-        print('Asset list:', list(self.asset_list))
+        asset_list = asset_list[asset_list != 'AS51 Index']
+        asset_list.index = [n for n in range(asset_list.shape[0])]
+        print('Asset list:', list(asset_list))
 
         # extract data for each asset
         df = pd.read_excel(self.ASSET_DATA_FILE_PATH, 'Bloomberg raw', header=1, index_col=0)
         sys.stdout.write('Data extracted:')
 
         self.data['returns'] = df.filter(regex='^DAY_TO_DAY_TOT_RETURN_GROSS_DVDS').iloc[:, 1:]
-        self.data['returns'].columns = self.asset_list
+        self.data['returns'].columns = asset_list
         sys.stdout.write(' returns')
         
         self.data['prices'] = df.filter(regex='^PX_LAST').iloc[:, 1:]
-        self.data['prices'].columns = self.asset_list
+        self.data['prices'].columns = asset_list
         sys.stdout.write(', prices')
 
         self.data['eqy_weighted_prices'] = df.filter(regex='^EQY_WEIGHTED_AVG_PX')
-        self.data['eqy_weighted_prices'].columns = self.asset_list
+        self.data['eqy_weighted_prices'].columns = asset_list
         sys.stdout.write(', equity weighted prices')
 
         self.data['volumes'] = df.filter(regex='^PX_VOLUME')
-        self.data['volumes'].columns = self.asset_list
+        self.data['volumes'].columns = asset_list
         sys.stdout.write(', volumes')
 
         self.data['mkt_caps'] = df.filter(regex='^CUR_MKT_CAP')
-        self.data['mkt_caps'].columns = self.asset_list
+        self.data['mkt_caps'].columns = asset_list
         sys.stdout.write(', market caps')
 
         # extract data for clients
-        self.all_clients = pd.read_excel(self.CLIENT_DATA_FILE_PATH, 'Data', header=0, index_col=0)
-        self.all_clients.drop(self.all_clients.filter(regex='Unnamed'), axis=1, inplace=True)
+        self.client_data = pd.read_excel(self.CLIENT_DATA_FILE_PATH, 'Data', header=0, index_col=0)
+        self.client_data.drop(self.client_data.filter(regex='Unnamed'), axis=1, inplace=True)
         sys.stdout.write(', client data')
         print()
 
@@ -107,29 +101,30 @@ class PortfolioManager:
         print()
         print('#'*10, 'Selecting relevant features', '#'*10)
         assert self.data, 'No data has been extracted'
+        assert not self.client_data.empty, 'No client data has been extracted'
 
-        if self.selected_features:
-            self.selected_features.clear()
-        if self.client_data:
-            self.client_data.clear()
-        
+        # select relevant features and remove unwanted features
         features = ['returns']
+        selected_data = {}
         for feature in features:
-            if self.is_normal(feature):
-                self.selected_features.append(feature)
+            assert self.is_normal(feature), 'feature not drawn from a normal distribution'
+            selected_data[feature] = self.data[feature]
+        self.data = selected_data
 
-        print('Selected features:', self.selected_features)
+        print('Selected features:', features)
         print('-'*30)
 
-        print('Randomly selecting 1 client\'s portfolios to optimise...')
-        self.client_id = np.random.randint(self.all_clients.index[0], self.all_clients.index[-1]+1)
-        self.client_data = self.all_clients.loc[self.client_id, :]
+        # select random client and remove all other clients
+        client_id = np.random.randint(self.client_data.index[0], self.client_data.index[-1]+1)
+        self.client_data = self.client_data.loc[client_id, :]
+        self.client_data.name = client_id
 
         risk_group = self.client_data.iloc[0]
         age_group = self.client_data.iloc[1]
         weights = self.client_data.iloc[2:]
 
-        print('Client:'+' '*6, self.client_id)
+        print('Randomly selecting 1 client\'s portfolios to optimise...')
+        print('Client:'+' '*6, self.client_data.name)
         print('Risk Profile:', risk_group, '('+self.get_client_risk(risk_group)+')')
         print('Age Group:'+' '*3, self.get_client_age(age_group))
         print('-'*20)
@@ -139,10 +134,10 @@ class PortfolioManager:
 
         client_return = self.portfolio_return(weights, self.data['returns'])
         client_stdev = self.portfolio_stdev(weights, self.data['returns'])
-        client_sharpe = self.portfolio_sharpe(weights, self.data['returns'], with_risk_free_asset=False)
+        client_sharpe = self.portfolio_sharpe(weights, self.data['returns'])
         print('Current return:', str(round(100*client_return, 3))+'%')
         print('Current volatility:', round(client_stdev, 3))
-        print('Current Sharpe:', round(client_sharpe, 4), '(no risk-free asset)')
+        print('Current Sharpe:', round(client_sharpe, 4))
 
 
     # test normality of feature
@@ -174,17 +169,44 @@ class PortfolioManager:
         
         return True
 
+    # run and test model using simulated returns data
+    def model_design(self):
+        print()
+        print('#'*10, 'Calculating portfolio weights using simulated return data', '#'*10)
+        assert 'returns' in self.data, 'Returns have not been selected as a relevant feature'
+
+        prices = {
+            'Risky' : 50*np.exp((-0.01-0.5*0.78**2)*1+0.78*np.sqrt(1)*np.random.standard_normal(365)),
+            'Flat' : 10*np.exp((-0.01-0.5*0.01**2)*1+0.01*np.sqrt(1)*np.random.standard_normal(365)),
+            'SmallCap' : 10*np.exp((-0.01-0.5*0.5**2)*1+0.5*np.sqrt(1)*np.random.standard_normal(365)),
+            'LargeCap' : 100*np.exp((-0.01-0.5*0.1**2)*1+0.1*np.sqrt(1)*np.random.standard_normal(365)),
+            'Gold' : 1000*np.exp((-0.01-0.5*0.05**2)*1+0.05*np.sqrt(1)*np.random.standard_normal(365))
+        }
+        prices = pd.DataFrame(prices)
+        prices.index = pd.date_range('2019-1-1', periods=365, freq='D')
+        returns = np.log(prices / prices.shift(1)).iloc[1:,:]*100
+
+        self.portfolio_allocation(
+            returns = returns, 
+            client_weights = np.random.dirichlet([1]*len(returns.columns)),
+            output_prefix = 'test'
+        )
+
+    # run model using our actual data
+    def model_implementation(self):
+        print()
+        print('#'*10, 'Calculating portfolio weights using extracted return data', '#'*10)
+        assert 'returns' in self.data, 'Returns have not been selected as a relevant feature'
+
+        self.portfolio_allocation(
+            returns = self.data['returns'],
+            client_weights = self.client_data.iloc[2:]
+        )
 
     # uses modern portfolio theory to assign portfolio weights
     # num_simulations controls the number of portfolio simulations to create
-    def model_design(self):
-        print()
-        print('#'*10, 'Calculating portfolio weights', '#'*10)
-        assert self.selected_features and 'returns' in self.selected_features, \
-            'Returns have not been selected as a relevant feature'
-
-        returns = self.data['returns']
-        n_assets = returns.shape[1]
+    def portfolio_allocation(self, returns: DataFrame, client_weights: list, output_prefix: str = None):
+        n_assets = returns.shape[1]        
 
         '''
         SIMULATING 2500 RANDOM PORTFOLIO WEIGHT COMBINATIONS
@@ -193,7 +215,7 @@ class PortfolioManager:
         simulated_returns = []
         simulated_stdevs = []
         for _ in range(2500):
-            weights = np.random.dirichlet([0.25]*n_assets)
+            weights = np.random.dirichlet([0.3]*n_assets)
             simulated_returns.append(self.portfolio_return(weights, returns))
             simulated_stdevs.append(self.portfolio_stdev(weights, returns))
 
@@ -214,47 +236,48 @@ class PortfolioManager:
             constraints = ({'type': 'eq', 'fun': lambda x:  np.sum(x) - 1})
         )
         assert portfolio_alloc_stdev['success'], portfolio_alloc_stdev['message']
+
         optimal_weights_volatility = portfolio_alloc_stdev['x']
         optimal_return_volatility = self.portfolio_return(optimal_weights_volatility, returns)
         optimal_stdev_volatility = self.portfolio_stdev(optimal_weights_volatility, returns)
         optimal_sharpe_volatility = \
-            self.portfolio_sharpe(optimal_weights_volatility, returns, with_risk_free_asset=False)
+            self.portfolio_sharpe(optimal_weights_volatility, returns)
 
         print('Portfolio Allocation - Minimising Volatility:')
         for idx, weight in enumerate(optimal_weights_volatility):
-            print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
+            print(returns.columns[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
         print('Estimated Return:', str(round(100*optimal_return_volatility, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_volatility, 3))
-        print('Sharpe Ratio:', round(optimal_sharpe_volatility, 4), '(no risk-free asset)')
+        print('Sharpe Ratio:', round(optimal_sharpe_volatility, 4))
         print('-'*20)
 
-        # portfolio allocation when maximising sharpe ratio (no risk-free asset)
+        # portfolio allocation when maximising sharpe ratio
         portfolio_alloc_sharpe = sco.minimize(
-            fun = lambda weights: -self.portfolio_sharpe(weights, returns, with_risk_free_asset=False),
+            fun = lambda weights: -self.portfolio_sharpe(weights, returns),
             x0 = [1/n_assets for _ in range(n_assets)], 
             method = 'SLSQP',
             bounds = [(0, 1) for _ in range(n_assets)], 
             constraints = ({'type': 'eq', 'fun': lambda x:  np.sum(x) - 1})
         )
         assert portfolio_alloc_sharpe['success'], portfolio_alloc_sharpe['message']
+
         optimal_weights_sharpe = portfolio_alloc_sharpe['x']
         optimal_return_sharpe = self.portfolio_return(optimal_weights_sharpe, returns)
         optimal_stdev_sharpe = self.portfolio_stdev(optimal_weights_sharpe, returns)
         optimal_sharpe_sharpe = \
-            self.portfolio_sharpe(optimal_weights_sharpe, returns, with_risk_free_asset=False)
+            self.portfolio_sharpe(optimal_weights_sharpe, returns)
 
-        print('Portfolio Allocation - Maximising Sharpe (no risk-free asset):')
+        print('Portfolio Allocation - Maximising Sharpe:')
         for idx, weight in enumerate(optimal_weights_sharpe):
-            print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
+            print(returns.columns[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
         print('Estimated Return:', str(round(100*optimal_return_sharpe, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_sharpe, 3))
-        print('Sharpe Ratio:', round(optimal_sharpe_sharpe, 4), '(no risk-free asset)')
-        print('-'*20)
+        print('Sharpe Ratio:', round(optimal_sharpe_sharpe, 4))
 
         # find efficient frontier for returns in range [0.001, 0.14]
-        efficient_returns = np.linspace(0.001, 0.14, 50)
+        efficient_returns = np.linspace(simulated_returns.min(), simulated_returns.max(), 50)
         efficient_stdevs = np.array([
             sco.minimize(
                 fun = self.portfolio_stdev, 
@@ -268,7 +291,7 @@ class PortfolioManager:
                 )
             )['fun'] for efficient_return in efficient_returns
         ])
-        min_stdev = np.argmin(efficient_stdevs)
+        min_stdev = efficient_stdevs.argmin()
         efficient_returns = efficient_returns[min_stdev:]
         efficient_stdevs = efficient_stdevs[min_stdev:]
 
@@ -276,47 +299,10 @@ class PortfolioManager:
         spline = sci.splrep(efficient_stdevs, efficient_returns)
         efficient_returns = sci.splev(efficient_stdevs, spline)
 
-        # return and volatility when efficient frontier is tangent to risk-free line
-        optimal_stdev_tangent = sco.fsolve(
-            # difference between slope formed by points [(stdev, return), (0, risk_free_rate)]
-            # and slope of the tangent at point stdev
-            func = lambda stdev: abs(
-                (sci.splev(stdev, spline) - self.risk_free_rate) / stdev - sci.splev(stdev, spline, der=1)
-            ), 
-            x0 = 1
-        )
-        optimal_return_tangent = sci.splev(optimal_stdev_tangent, spline)[0]
-
-        # portfolio allocation when efficient frontier is tangent to risk-free line
-        portfolio_alloc_tangent = sco.minimize(
-            fun = self.portfolio_stdev,
-            x0 = [1/n_assets for _ in range(n_assets)], 
-            args = returns,
-            method = 'SLSQP',
-            bounds = [(0, 1) for _ in range(n_assets)],
-            constraints = (
-                {'type': 'eq', 'fun': lambda x: self.portfolio_return(x, returns) - optimal_return_tangent},
-                {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}, 
-            )
-        )
-        assert portfolio_alloc_tangent['success'], portfolio_alloc_tangent['message']
-        optimal_weights_tangent = portfolio_alloc_tangent['x']
-        optimal_sharpe_tangent = \
-            self.portfolio_sharpe(optimal_weights_tangent, returns)
-        
-        print('Portfolio Allocation - Optimising Tangent to risk-free asset:')
-        for idx, weight in enumerate(optimal_weights_tangent):
-            print(self.asset_list[idx]+':', str(round(100*weight, 3))+'%')
-        print('-'*20)
-        print('Estimated Return:', str(round(100*float(optimal_return_tangent), 3))+'%')
-        print('Estimated Volatility:', round(float(optimal_stdev_tangent), 3))
-        print('Sharpe Ratio:', round(optimal_sharpe_tangent, 4), '(with risk-free asset)')
-
         '''
         Calculate client portfolio statistics
         '''
 
-        client_weights = self.client_data.iloc[2:]
         client_return = self.portfolio_return(client_weights, returns)
         client_stdev = self.portfolio_stdev(client_weights, returns)
 
@@ -329,7 +315,7 @@ class PortfolioManager:
         plt.scatter(
             x = simulated_stdevs, 
             y = simulated_returns*100, 
-            c = simulated_returns*100 / simulated_stdevs,
+            c = (simulated_returns - self.risk_free_rate) / simulated_stdevs,
             marker = 'o', 
         )
         # plot efficient frontier
@@ -350,17 +336,9 @@ class PortfolioManager:
         plt.plot(
             optimal_stdev_sharpe, 
             optimal_return_sharpe*100,
-            'm*',
+            'b*',
             markersize = 15.0, 
-            label = 'Highest Sharpe Ratio (no risk-free asset)'
-        )
-        # plot optimal tangent portfolio (with risk-free asset)
-        plt.plot(
-            optimal_stdev_tangent, 
-            optimal_return_tangent*100, 
-            'b*', 
-            markersize = 15.0, 
-            label = 'Optimal Tangent (with risk-free asset)'
+            label = 'Optimal Sharpe Ratio'
         )
         # plot client portfolio
         plt.plot(
@@ -371,13 +349,15 @@ class PortfolioManager:
             label = 'Current Portfolio'
         )
         # plot information
-        plt.title('Client '+str(self.client_id)+' Portfolio Simulation', {'size': 20})
+        plt.title('Client '+str(self.client_data.name)+' Portfolio Simulation', {'size': 20})
         plt.legend(loc = 'upper right')
         plt.grid(True)
         plt.xlabel('Expected volatility')
         plt.ylabel('Expected return (%)')
         plt.colorbar(label = 'Sharpe ratio')
-        plt.savefig(self.OUTPUT_PATH / Path('optimal_portfolios.png'))
+        path = self.OUTPUT_PATH / Path(output_prefix+'_optimal_portfolios.png') if output_prefix else \
+               self.OUTPUT_PATH / Path('optimal_portfolios.png')
+        plt.savefig(path)
         plt.close()
 
 
@@ -395,11 +375,8 @@ class PortfolioManager:
             raise ValueError('Number of weights and assets must match')
 
 
-    def portfolio_sharpe(self, weights, returns, with_risk_free_asset: bool = True) -> float:
+    def portfolio_sharpe(self, weights, returns) -> float:
         try:
-            if with_risk_free_asset:
-                return (self.portfolio_return(weights, returns) - self.risk_free_rate) / self.portfolio_stdev(weights, returns)
-            else:
-                return self.portfolio_return(weights, returns) / self.portfolio_stdev(weights, returns)
+            return (self.portfolio_return(weights, returns) - self.risk_free_rate) / self.portfolio_stdev(weights, returns)
         except ValueError:
             raise ValueError('Number of weights and assets must match')
