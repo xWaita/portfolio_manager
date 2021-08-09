@@ -11,7 +11,7 @@ import math
 np.random.seed(420420)
 
 
-class PortfolioManager:
+class PortfolioOptimiser:
 
     DATALAKE_PATH = Path('datalake')
     ASSET_DATA_FILE_PATH = DATALAKE_PATH / Path('ASX200top10.xlsx')
@@ -19,7 +19,6 @@ class PortfolioManager:
     OUTPUT_PATH = Path('output')
 
     risk_free_rate = 0.02
-
 
     def __init__(self):
         self.data = {}
@@ -51,7 +50,7 @@ class PortfolioManager:
 
     # extract data from excel sheet
     def ETL(self):
-        print('#'*10, 'Extracting data from excel','#'*10)
+        print('#'*10, 'Extracting Equity Data from Excel','#'*10)
 
         if self.data:
             self.data.clear()
@@ -63,56 +62,50 @@ class PortfolioManager:
             pd.read_excel(self.ASSET_DATA_FILE_PATH, 'Bloomberg raw', header=None).iloc[0, :].dropna()
         asset_list = asset_list[asset_list != 'AS51 Index']
         asset_list.index = [n for n in range(asset_list.shape[0])]
-        print('Asset list:', list(asset_list))
 
         # extract data for each asset
         df = pd.read_excel(self.ASSET_DATA_FILE_PATH, 'Bloomberg raw', header=1, index_col=0)
-        sys.stdout.write('Data extracted:')
 
         self.data['returns'] = df.filter(regex='^DAY_TO_DAY_TOT_RETURN_GROSS_DVDS').iloc[:, 1:]
         self.data['returns'].columns = asset_list
-        sys.stdout.write(' returns')
         
         self.data['prices'] = df.filter(regex='^PX_LAST').iloc[:, 1:]
         self.data['prices'].columns = asset_list
-        sys.stdout.write(', prices')
 
         self.data['eqy_weighted_prices'] = df.filter(regex='^EQY_WEIGHTED_AVG_PX')
         self.data['eqy_weighted_prices'].columns = asset_list
-        sys.stdout.write(', equity weighted prices')
 
         self.data['volumes'] = df.filter(regex='^PX_VOLUME')
         self.data['volumes'].columns = asset_list
-        sys.stdout.write(', volumes')
 
         self.data['mkt_caps'] = df.filter(regex='^CUR_MKT_CAP')
         self.data['mkt_caps'].columns = asset_list
-        sys.stdout.write(', market caps')
+
+        print('Extracted: ', self.data.keys())
+        print('ASset List:', list(asset_list))
 
         # extract data for clients
         self.client_data = pd.read_excel(self.CLIENT_DATA_FILE_PATH, 'Data', header=0, index_col=0)
         self.client_data.drop(self.client_data.filter(regex='Unnamed'), axis=1, inplace=True)
-        sys.stdout.write(', client data')
-        print()
 
 
     # select relevant features that we will use in our model.
     def feature_engineering(self):
         print()
-        print('#'*10, 'Selecting relevant features', '#'*10)
+        print('#'*10, 'Selecting Relevant Features', '#'*10)
         assert self.data, 'No data has been extracted'
         assert not self.client_data.empty, 'No client data has been extracted'
 
         # select relevant features and remove unwanted features
         features = ['returns']
+        print('Selecting features:', features)
         selected_data = {}
         for feature in features:
             assert self.is_normal(feature), 'feature not drawn from a normal distribution'
             selected_data[feature] = self.data[feature]
         self.data = selected_data
 
-        print('Selected features:', features)
-        print('-'*30)
+        print('-'*20)
 
         # select random client and remove all other clients
         client_id = np.random.randint(self.client_data.index[0], self.client_data.index[-1]+1)
@@ -123,10 +116,12 @@ class PortfolioManager:
         age_group = self.client_data.iloc[1]
         weights = self.client_data.iloc[2:]
 
-        print('Randomly selecting 1 client\'s portfolios to optimise...')
-        print('Client:'+' '*6, self.client_data.name)
+        self.save_portfolio(weights, 'portfolio_client')
+
+        print('Randomly selected 1 client\'s portfolios to optimise...')
+        print('Client:      ', self.client_data.name)
         print('Risk Profile:', risk_group, '('+self.get_client_risk(risk_group)+')')
-        print('Age Group:'+' '*3, self.get_client_age(age_group))
+        print('Age Group:   ', self.get_client_age(age_group))
         print('-'*20)
         print('Client Holdings:')
         print(weights.to_string())
@@ -135,13 +130,13 @@ class PortfolioManager:
         client_return = self.portfolio_return(weights, self.data['returns'])
         client_stdev = self.portfolio_stdev(weights, self.data['returns'])
         client_sharpe = self.portfolio_sharpe(weights, self.data['returns'])
-        print('Current return:', str(round(100*client_return, 3))+'%')
+        print('Current return:    ', str(round(100*client_return, 3))+'%')
         print('Current volatility:', round(client_stdev, 3))
-        print('Current Sharpe:', round(client_sharpe, 4))
+        print('Current Sharpe:    ', round(client_sharpe, 4))
 
 
     # test normality of feature
-    def is_normal(self, feature: str, output_graphs: bool = True) -> bool:
+    def is_normal(self, feature: str) -> bool:
         print('Testing Normality of', feature)
 
         # graphical inspection using density plot
@@ -172,7 +167,7 @@ class PortfolioManager:
     # run and test model using simulated returns data
     def model_design(self):
         print()
-        print('#'*10, 'Calculating portfolio weights using simulated return data', '#'*10)
+        print('#'*10, 'Testing Portfolio Optimiser using Simulated Return Data', '#'*10)
         assert 'returns' in self.data, 'Returns have not been selected as a relevant feature'
 
         prices = {
@@ -186,26 +181,26 @@ class PortfolioManager:
         prices.index = pd.date_range('2019-1-1', periods=365, freq='D')
         returns = np.log(prices / prices.shift(1)).iloc[1:,:]*100
 
-        self.portfolio_allocation(
+        self.portfolio_optimiser(
             returns = returns, 
             client_weights = np.random.dirichlet([1]*len(returns.columns)),
-            output_prefix = 'test'
+            output_suffix = '_simulated'
         )
 
     # run model using our actual data
     def model_implementation(self):
         print()
-        print('#'*10, 'Calculating portfolio weights using extracted return data', '#'*10)
+        print('#'*10, 'Running Portfolio Optimiser using Extracted Return Data', '#'*10)
         assert 'returns' in self.data, 'Returns have not been selected as a relevant feature'
 
-        self.portfolio_allocation(
+        self.portfolio_optimiser(
             returns = self.data['returns'],
             client_weights = self.client_data.iloc[2:]
         )
 
     # uses modern portfolio theory to assign portfolio weights
     # num_simulations controls the number of portfolio simulations to create
-    def portfolio_allocation(self, returns: DataFrame, client_weights: list, output_prefix: str = None):
+    def portfolio_optimiser(self, returns: DataFrame, client_weights: list, output_suffix: str = ''):
         n_assets = returns.shape[1]        
 
         '''
@@ -247,9 +242,9 @@ class PortfolioManager:
         for idx, weight in enumerate(optimal_weights_volatility):
             print(returns.columns[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
-        print('Estimated Return:', str(round(100*optimal_return_volatility, 3))+'%')
+        print('Estimated Return:    ', str(round(100*optimal_return_volatility, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_volatility, 3))
-        print('Sharpe Ratio:', round(optimal_sharpe_volatility, 4))
+        print('Sharpe Ratio:        ', round(optimal_sharpe_volatility, 4))
         print('-'*20)
 
         # portfolio allocation when maximising sharpe ratio
@@ -272,9 +267,9 @@ class PortfolioManager:
         for idx, weight in enumerate(optimal_weights_sharpe):
             print(returns.columns[idx]+':', str(round(100*weight, 3))+'%')
         print('-'*20)
-        print('Estimated Return:', str(round(100*optimal_return_sharpe, 3))+'%')
+        print('Estimated Return:    ', str(round(100*optimal_return_sharpe, 3))+'%')
         print('Estimated Volatility:', round(optimal_stdev_sharpe, 3))
-        print('Sharpe Ratio:', round(optimal_sharpe_sharpe, 4))
+        print('Sharpe Ratio:        ', round(optimal_sharpe_sharpe, 4))
 
         # find efficient frontier for returns in range [0.001, 0.14]
         efficient_returns = np.linspace(simulated_returns.min(), simulated_returns.max(), 50)
@@ -307,9 +302,13 @@ class PortfolioManager:
         client_stdev = self.portfolio_stdev(client_weights, returns)
 
         '''
-        PLOTTING MODEL RESULTS
+        PLOTTING MODEL RESULTS AND SAVE TABLES
         '''
-        
+        if not output_suffix:
+            self.save_portfolio(client_weights, 'portfolio_client')
+            self.save_portfolio(optimal_weights_sharpe, 'portfolio_optimal_sharpe')
+            self.save_portfolio(optimal_weights_volatility, 'portfolio_minimum_volatility')
+
         plt.figure(figsize=(16, 8))
         # plot return and volatility of simulated portfolios
         plt.scatter(
@@ -355,8 +354,7 @@ class PortfolioManager:
         plt.xlabel('Expected volatility')
         plt.ylabel('Expected return (%)')
         plt.colorbar(label = 'Sharpe ratio')
-        path = self.OUTPUT_PATH / Path(output_prefix+'_optimal_portfolios.png') if output_prefix else \
-               self.OUTPUT_PATH / Path('optimal_portfolios.png')
+        path = self.OUTPUT_PATH / Path('optimal_portfolios'+output_suffix+'.png')
         plt.savefig(path)
         plt.close()
 
@@ -380,3 +378,10 @@ class PortfolioManager:
             return (self.portfolio_return(weights, returns) - self.risk_free_rate) / self.portfolio_stdev(weights, returns)
         except ValueError:
             raise ValueError('Number of weights and assets must match')
+
+
+    def save_portfolio(self, weights, name):
+        with pd.ExcelWriter(self.OUTPUT_PATH / Path(name+'.xlsx')) as writer:
+            Series(weights, index=self.data['returns'].columns, name='Weights (%)') \
+                .map(lambda x: round(x*100, 2)) \
+                .to_excel(writer)
