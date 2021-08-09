@@ -28,7 +28,7 @@ def print_title(title: str):
 
 def main():
     run_portfolio_optimiser()
-    # run_sentiment_advisor()
+    run_sentiment_advisor()
 
 if __name__ == '__main__':
     main()
